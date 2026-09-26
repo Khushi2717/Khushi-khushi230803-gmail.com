@@ -71,12 +71,48 @@ export function issueAccessToken({ userId, orgId, role, permVersion }, secret) {
 // `node scripts/check-jwt.js` is the public test suite for this function.
 // ---------------------------------------------------------------------------
 export function verifyAccessToken(token, secret) {
-  // YOURS TO WRITE. Every failure mode listed above must be a 401 UNAUTHENTICATED.
-  // `node scripts/check-jwt.js` is the public suite for this function.
-  throw Object.assign(
-    new Error('TODO: server/auth.js — verifyAccessToken() is yours to write (AUTH-DATA-MODEL.md §10).'),
-    { code: 'NOT_IMPLEMENTED' }
-  );
+  if (typeof token !== 'string') throw unauthenticated('malformed token');
+  const parts = token.split('.');
+  if (parts.length !== 3) throw unauthenticated('malformed token');
+  const [h, p, s] = parts;
+
+  let header, payload;
+  try {
+    header = JSON.parse(unb64(h).toString('utf8'));
+    payload = JSON.parse(unb64(p).toString('utf8'));
+  } catch {
+    throw unauthenticated('malformed token');
+  }
+
+  if (!header || header.alg !== ALG || header.typ !== 'JWT') {
+    throw unauthenticated('unsupported algorithm');
+  }
+
+  const expectedSig = createHmac('sha256', secret).update(`${h}.${p}`).digest();
+  let providedSig;
+  try {
+    providedSig = unb64(s);
+  } catch {
+    throw unauthenticated('malformed token');
+  }
+  if (providedSig.length !== expectedSig.length || !timingSafeEqual(providedSig, expectedSig)) {
+    throw unauthenticated('invalid signature');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== 'number' || payload.exp <= now) {
+    throw unauthenticated('token expired');
+  }
+
+  if (payload.iss !== ISS || payload.aud !== AUD) {
+    throw unauthenticated('invalid issuer or audience');
+  }
+
+  if (!payload.jti || typeof payload.jti !== 'string') {
+    throw unauthenticated('missing jti');
+  }
+
+  return payload;
 }
 
 

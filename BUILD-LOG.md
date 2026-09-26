@@ -33,6 +33,20 @@ What did the starting line actually look like, and which failure surprised you?_
 
 _What did you expect each failure mode to look like before you ran it? Which one behaved
 differently from your expectation, and what did that tell you?_
+### 2026-09-26
+
+Expected verifyAccessToken to need a few debugging passes, especially around
+the algorithm-confusion cases (alg: none, HS512/RS256 substitution). Wrote all
+7 checks from AUTH-DATA-MODEL.md §10 in order — malformed shape, invalid JSON,
+untrusted alg/typ, constant-time signature check, exp <= now (not <), iss/aud,
+jti. Ran check-jwt.js: 43/43 passed on the first try.
+
+One thing I had to get right that isn't spelled out in the TODO comment:
+node's timingSafeEqual throws (doesn't return false) if the two buffers it's
+comparing have different lengths. So I check
+providedSig.length !== expectedSig.length before calling it — otherwise a
+token with a truncated or malformed signature would crash the request with
+an uncaught exception instead of cleanly returning 401 UNAUTHENTICATED.
 
 ## Phase 2 — caller context and the resolution engine
 
