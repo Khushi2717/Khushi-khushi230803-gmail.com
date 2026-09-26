@@ -28,6 +28,23 @@ Note: this is the failure mode where a passing test is worse than a failing one.
 
 _Installed, reset the database, read the documents, ran the suites against the untouched skeleton.
 What did the starting line actually look like, and which failure surprised you?_
+### 2026-09-26
+
+Hit a platform bug in the provided scripts/load-db.js: `new URL(p,
+import.meta.url).pathname` on Windows returns a leading-slash form like
+'/C:/Users/...', which produced a doubled 'C:\C:\...' path and crashed
+db:load with ENOENT. Fixed locally by switching to
+fileURLToPath(new URL(...)) instead of .pathname, which normalizes
+correctly cross-platform. Not a bug in my own code -- infrastructure
+provided by the exercise, likely only tested on Mac/Linux.
+
+Also: db:load revealed the personalisation overlay -- an extra role
+"reviewer" (rank 35) and an extra permission "device:reboot", not
+mentioned anywhere in PERMISSIONS.md. Since resolve() in permissions.js
+reads roles/permissions/role_permissions from the DB tables directly
+(never hardcodes the 5-role, 19-permission matrix from the docs), this
+should already resolve correctly without any extra code -- to verify
+once check-api.js runs.
 
 ## Phase 1 — token verification
 
