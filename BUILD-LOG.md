@@ -89,6 +89,16 @@ failure reasons distinguishable?_
 ## Phase 6 — audit
 
 _What did you decide counts as an auditable event, and what pushed you to that line?_
+### 2026-09-26
+
+Decision: auditDenials only logs when the caught error is specifically a
+FORBIDDEN (403) HttpError — not every thrown error. A 404 (invisible
+resource) or 400 (bad input) isn't a permission decision, so logging those
+as audit 'deny' rows would conflate "you don't have access" with "your
+request was malformed", muddying what the audit log is supposed to answer.
+Success rows are the caller's job to write inline, in the same transaction
+as the change — this module doesn't wrap successes automatically, to avoid
+double-logging if a route already writes its own success row.
 
 ## Phase 7 — the console
 
