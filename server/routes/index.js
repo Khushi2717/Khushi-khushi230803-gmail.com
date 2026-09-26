@@ -17,7 +17,6 @@ const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export function registerRoutes(router, deps) {
   const { db, secret } = deps;
 
-  // ---- small helpers, used across several routes ----------------------
   function setRefreshCookie(res, token, maxAgeSeconds) {
     res.setHeader('Set-Cookie', `refresh_token=${token}; HttpOnly; Path=/v1/auth; Max-Age=${maxAgeSeconds}; SameSite=Strict`);
   }
@@ -55,19 +54,21 @@ export function registerRoutes(router, deps) {
     if (!email || !password) throw badRequest('email and password are required');
 
     const user = db.prepare(`SELECT * FROM users WHERE email = ?`).get(String(email).toLowerCase());
-    // Same failure for "no such user" and "wrong password" — avoids an account
-    // enumeration oracle (BRIEF.md §5.3).
     if (!user || !verifyPassword(password, user.password_hash)) {
       throw unauthenticated('invalid email or password');
     }
 
+    // ORDER BY created_at ASC: a user can belong to multiple orgs with different
+    // roles (e.g. owner in one, viewer in another), so which org becomes "active"
+    // on login must be deterministic, not whatever order SQLite happens to return.
     const memberships = db.prepare(
       `SELECT m.* FROM memberships m JOIN organizations o ON o.id = m.org_id
-       WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL`
+       WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL
+       ORDER BY m.created_at ASC`
     ).all(user.id);
     if (memberships.length === 0) throw unauthenticated('no active organization membership');
 
-    const active = memberships[0]; // arbitrary but deterministic starting org
+    const active = memberships[0];
     const access = issueForMembership(user.id, active);
 
     const refreshRaw = newRefreshToken();
@@ -92,7 +93,9 @@ export function registerRoutes(router, deps) {
     ).run(newId('rt'), row.user_id, hashRefreshToken(newRaw), row.family_id, new Date(Date.now() + REFRESH_TTL_MS).toISOString());
     setRefreshCookie(res, newRaw, REFRESH_TTL_MS / 1000);
 
-    const membership = db.prepare(`SELECT * FROM memberships WHERE user_id = ? AND status = 'active'`).get(row.user_id);
+    const membership = db.prepare(
+      `SELECT * FROM memberships WHERE user_id = ? AND status = 'active' ORDER BY created_at ASC`
+    ).get(row.user_id);
     if (!membership) throw unauthenticated('no active membership');
     send(res, 200, { accessToken: issueForMembership(row.user_id, membership), expiresIn: ACCESS_TTL_SECONDS });
   });
@@ -101,7 +104,7 @@ export function registerRoutes(router, deps) {
     const { orgId } = ctx.body;
     if (!orgId) throw badRequest('orgId is required');
     const membership = db.prepare(`SELECT * FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'`).get(orgId, ctx.userId);
-    if (!membership) throw notFound(); // not a member -> invisible, never 403
+    if (!membership) throw notFound();
     send(res, 200, { accessToken: issueForMembership(ctx.userId, membership), expiresIn: ACCESS_TTL_SECONDS });
   });
 
@@ -188,7 +191,7 @@ export function registerRoutes(router, deps) {
       throw conflict('an active invite for this email already exists');
     }
     audit(db, { orgId: ctx.orgId, actorId: ctx.userId, action: 'invite.create', targetType: 'invite', targetId: id, result: 'allow', requestId: ctx.requestId });
-    send(res, 201, { id, email, role, token: raw }); // returned once, per BRIEF.md §4 (invite tokens are credentials)
+    send(res, 201, { id, email, role, token: raw });
   });
 
   router.get('/v1/orgs/:org/invites', async (ctx, params, res) => {
@@ -206,7 +209,6 @@ export function registerRoutes(router, deps) {
     send(res, 200, { ok: true });
   });
 
-  // Public — no auth required.
   router.get('/v1/invites/:token', async (ctx, params, res) => {
     const invite = db.prepare(`SELECT * FROM invites WHERE token_hash = ?`).get(hashInviteToken(params.token));
     if (!invite || invite.revoked_at || invite.accepted_at || invite.expires_at <= nowIso()) throw gone();
@@ -214,7 +216,6 @@ export function registerRoutes(router, deps) {
     send(res, 200, { email: invite.email, role: invite.role, org });
   });
 
-  // Public — no auth required.
   router.post('/v1/invites/:token/accept', async (ctx, params, res) => {
     const invite = db.prepare(`SELECT * FROM invites WHERE token_hash = ?`).get(hashInviteToken(params.token));
     if (!invite || invite.revoked_at || invite.accepted_at || invite.expires_at <= nowIso()) throw gone();
@@ -281,7 +282,6 @@ export function registerRoutes(router, deps) {
     send(res, 200, { ok: true });
   });
 
-  // Registered BEFORE /members/:userId so 'me' isn't swallowed as a userId param.
   router.delete('/v1/orgs/:org/members/me', async (ctx, params, res) => {
     const target = db.prepare(`SELECT * FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'`).get(ctx.orgId, ctx.userId);
     if (!target) throw notFound();
@@ -311,8 +311,6 @@ export function registerRoutes(router, deps) {
     assertCan(db, ctx, 'device:list');
     const devices = db.prepare(`SELECT * FROM devices WHERE org_id = ? AND deleted_at IS NULL`).all(ctx.orgId);
     const { byDevice } = resolveDevices(db, { userId: ctx.userId, orgId: ctx.orgId, deviceIds: devices.map(d => d.id) });
-    // device:view decides visibility PER ROW — deny removes the row entirely, never
-    // shown with redacted fields (PERMISSIONS.md §4).
     const rows = devices
       .filter(d => byDevice[d.id]['device:view']?.effect === 'allow')
       .map(d => ({ id: d.id, name: d.name, kind: d.kind, online: !!d.online, permissions: byDevice[d.id] }));
@@ -366,7 +364,6 @@ export function registerRoutes(router, deps) {
     if (!toOrgId) throw badRequest('toOrgId is required');
     const targetMembership = db.prepare(`SELECT * FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'`).get(toOrgId, ctx.userId);
     if (!targetMembership) throw notFound();
-    // device:provision required in BOTH orgs (BRIEF.md §5.1).
     const targetResolved = resolve(db, { userId: ctx.userId, orgId: toOrgId, deviceId: null });
     if (targetResolved.permissions['device:provision']?.effect !== 'allow') {
       throw forbidden('missing permission: device:provision in destination org');
@@ -389,7 +386,6 @@ export function registerRoutes(router, deps) {
     if (!['allow', 'deny'].includes(effect)) throw badRequest('effect must be allow or deny');
     if (userId === ctx.userId) throw forbidden('cannot create a grant for yourself', 'self_grant');
 
-    // D9: no laundering — only grant authority you hold, at that scope.
     assertMayGrant(db, ctx, permissions, deviceId ?? null);
 
     const starts = normalizeTs(startsAt, 'startsAt');
@@ -446,8 +442,6 @@ export function registerRoutes(router, deps) {
         `INSERT INTO sessions (id, org_id, user_id, device_id, mode, state, authorized_by, expires_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`
       ).run(id, ctx.orgId, ctx.userId, device.id, mode, authorizedBy, expiresAt);
     } catch {
-      // one_exclusive_session_per_device caught this race — the DB enforces D10,
-      // not a check-then-insert in application code.
       throw deviceBusy();
     }
 
