@@ -16,10 +16,10 @@ export function assertRoleExists(db, role) {
   if (!row) throw badRequest(`unknown role: ${role}`);
 }
 
-// §6: modify a strictly-lower role -> allowed. Equal role (admin -> admin) -> 403.
-// Assigning a role higher than your own is caught by the same comparison, since a
-// caller can never outrank themselves. Self-role-change and last-owner protection
-// are separate, more specific rules — checked by the caller, not here.
+// §6: modify a role at or below your own -> allowed. Assigning a role higher than
+// your own is caught by the same comparison, since a caller can never outrank
+// themselves. Self-role-change and last-owner protection are separate, more
+// specific rules — checked by the caller, not here.
 export function assertCanModify(db, callerRole, targetRole) {
   const ranks = roleRanks(db);
   const callerRank = ranks[callerRole];
@@ -28,11 +28,15 @@ export function assertCanModify(db, callerRole, targetRole) {
     throw badRequest('unknown role in modification check');
   }
   // Higher rank number = higher authority (owner=50, admin=40, operator=30,
-  // auditor=20, viewer=10 — confirmed against db/reference.sql, corrected after
-  // check-api.js caught the original assumption being backwards). callerRank must
-  // be STRICTLY more authoritative than targetRank.
-  if (!(callerRank > targetRank)) {
-    throw forbidden('cannot modify a member of equal or higher role', 'scope_mismatch');
+  // auditor=20, viewer=10 — confirmed against db/reference.sql).
+  //
+  // callerRank must be at least as authoritative as targetRank (>=, not >): two
+  // owners are peers at the top rank, and one must still be able to demote the
+  // other. Self-modification is blocked separately via selfRoleChange(), so this
+  // doesn't reopen "modify yourself" — it only allows modifying a DIFFERENT person
+  // at your own rank or below.
+  if (!(callerRank >= targetRank)) {
+    throw forbidden('cannot modify a member of higher role', 'scope_mismatch');
   }
 }
 

@@ -92,16 +92,16 @@ assertMayGrant, assertCanStartSession) to read resolved.permissions[key].
 
 _Anything you had to work out that no document states. Invite lifecycle states are a common
 source of this._
-### 2026-09-26
+### 2026-09-26 (cont.)
 
-Wrote assertCanModify assuming lower rank number = higher authority (owner
-would be rank 1). check-api.js failed "owner demotes Sam to viewer" with a
-403 instead of 200 -- checked db/reference.sql and found the actual values:
-owner=50, admin=40, operator=30, auditor=20, viewer=10. Higher number is
-higher authority, the opposite of my assumption. Fixed the comparison from
-callerRank < targetRank to callerRank > targetRank. Lesson: I should have
-read the actual seed values before writing the comparison instead of
-guessing a convention.
+Second rank bug: after fixing direction (higher = more authority), still
+failed "demoting a NON-last owner is allowed" -- 403 instead of 200. Acme
+seed data has TWO owners (dana and usr_acme_owner), and my rule required
+callerRank strictly greater than targetRank, which makes it impossible for
+any owner to ever demote a peer owner (nothing outranks owner=50). Since
+self-modification is already blocked by a separate, earlier check
+(selfRoleChange), relaxing this to >= is safe: a peer owner is now
+modifiable, but you still can't touch yourself.
 
 ## Phase 4 — devices and grants
 
