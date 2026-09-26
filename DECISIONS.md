@@ -11,12 +11,30 @@ Rules, from `DISCOVERY-BRIEF.md`:
 
 ---
 
-### <the decision, as a claim — not "permissions", but "the org-level view counts device-scoped grants">
+### Default active org at login is the alphabetically-first org by name
 
-**What I chose:**
-**Why:** _(evidence: test, log line, commit)_
-**What I rejected:** _(the plausible alternative, and the specific reason it fails)_
-**What would change my mind:**
+**What I chose:** when a user has active memberships in more than one org and logs in without specifying which one, the org that becomes active is the alphabetically first by `organizations.name`.
+**Why:** `check-api.js` requires a deterministic outcome ("dana is owner in Acme") for a user who is owner in one org and viewer in another, but neither `BRIEF.md` nor `PERMISSIONS.md` specifies how to pick the default org. Without an explicit `ORDER BY`, SQLite's row order is not guaranteed, and the test failed intermittently with `role: undefined` until I added ordering.
+**What I rejected:** ordering by `memberships.created_at` first — it looked more "natural" (first org joined), but seed-data timestamps can tie or be ambiguous, and the test only cares that the result is deterministic and specifically resolves to Acme for this fixture. Alphabetical-by-name is simpler to state and verify than an insertion-order assumption I can't fully control from the seed script.
+**What would change my mind:** if the API were extended to let the client explicitly request a `orgId` at login (the test's `login()` helper already has an unused hook for this) and that became the primary path — the default-selection rule would then only matter as a fallback.
+
+---
+
+### Unknown permissions are validated before any grant row is written
+
+**What I chose:** `POST /orgs/:org/grants` checks every permission string against `permission_patterns` up front and throws a `400` with `reason: "unknown_permission"` before inserting anything, rather than letting the database's foreign key reject it.
+**Why:** the schema's own comment on `grant_permissions` says an unknown permission should be "a DB error, not a silent deny" (D19), but `check-api.js` expects a specific, controlled `400`/`unknown_permission` response — not an uncaught SQLite constraint exception, which would otherwise crash the request with a raw 500.
+**What I rejected:** relying solely on the FK constraint and catching the resulting SQLite error generically in the grants route. This works but loses the specific `reason` code the API contract requires, and risks leaving a partially-inserted `grants` row if the failure happens partway through the `grant_permissions` insert loop.
+**What would change my mind:** if grants could ever be created in bulk across a transaction boundary where "reject the whole batch atomically" mattered more than "tell the client which permission was invalid" — then the DB-level rejection alone might be preferable.
+
+---
+
+### Role modification authority uses >=, not >, on rank
+
+**What I chose:** `assertCanModify` allows a caller to modify a target whose rank is less than OR EQUAL to the caller's own rank (`callerRank >= targetRank`), not strictly less.
+**Why:** `node scripts/check-api.js` failed "demoting a NON-last owner is allowed" (got 403, wanted 200) under a strict `>` comparison. Acme's seed data has two owners, and with owner being the highest rank (50), no `>` comparison can ever let one owner modify another, since nothing outranks owner. Fixed in commit `d5e6e5e`.
+**What I rejected:** a strict `>` comparison, which is what I originally wrote based on an assumption about rank direction I never checked against `db/reference.sql`. The same file also caught an earlier, more basic error: I had assumed lower rank numbers meant higher authority, which `check-api.js`'s "owner demotes Sam to viewer" failure (commit `806f790`) disproved first — the real values are owner=50 down to viewer=10.
+**What would change my mind:** if a future spec explicitly said co-owners can never modify each other, since self-modification is already blocked by a separate, earlier check (`selfRoleChange`) that can't double as "self vs. peer" logic — a different mechanism would be needed entirely.
 
 <!-- Copy the block above per decision. The two stubs below show the required shape and contain no
      engineering content — replace or delete them. -->
