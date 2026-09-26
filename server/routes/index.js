@@ -45,6 +45,35 @@ export function registerRoutes(router, deps) {
       secret
     );
   }
+  function listOrgsFor(userId) {
+    return db.prepare(
+      `SELECT o.id, o.name, o.theme, m.role FROM memberships m JOIN organizations o ON o.id = m.org_id
+       WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL`
+    ).all(userId);
+  }
+  function parsePagination(ctx) {
+    let limit = 200;
+    let offset = 0;
+    if (ctx.query.has('limit')) {
+      const n = Number(ctx.query.get('limit'));
+      if (!Number.isInteger(n) || n < 1 || n > 200) throw badRequest('limit must be an integer between 1 and 200');
+      limit = n;
+    }
+    if (ctx.query.has('offset')) {
+      const n = Number(ctx.query.get('offset'));
+      if (!Number.isInteger(n) || n < 0) throw badRequest('offset must be a non-negative integer');
+      offset = n;
+    }
+    return { limit, offset };
+  }
+  // A raw invite token that hashes to no row at all is INVISIBLE (404) -- distinct from
+  // one that exists but is spent/revoked/expired (409/410). Same 404-vs-403 logic as
+  // resources, applied to a bearer credential instead of an org.
+  function findInviteOr404(token) {
+    const invite = db.prepare(`SELECT * FROM invites WHERE token_hash = ?`).get(hashInviteToken(token));
+    if (!invite) throw notFound();
+    return invite;
+  }
 
   // =====================================================================
   // AUTH
@@ -58,26 +87,27 @@ export function registerRoutes(router, deps) {
       throw unauthenticated('invalid email or password');
     }
 
-    // ORDER BY created_at ASC: a user can belong to multiple orgs with different
-    // roles (e.g. owner in one, viewer in another), so which org becomes "active"
-    // on login must be deterministic, not whatever order SQLite happens to return.
+    // DECISION: a user can be active in several orgs at once (different roles in
+    // each). With no orgId requested, the default active org is the alphabetically
+    // first by name -- deterministic and documentable, since nothing in BRIEF.md or
+    // PERMISSIONS.md specifies this and the login response must pick ONE.
     const memberships = db.prepare(
       `SELECT m.* FROM memberships m JOIN organizations o ON o.id = m.org_id
        WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL
-       ORDER BY m.created_at ASC`
+       ORDER BY o.name ASC`
     ).all(user.id);
     if (memberships.length === 0) throw unauthenticated('no active organization membership');
 
     const active = memberships[0];
-    const access = issueForMembership(user.id, active);
+    const token = issueForMembership(user.id, active);
 
     const refreshRaw = newRefreshToken();
     db.prepare(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, expires_at) VALUES (?, ?, ?, ?, ?)`
     ).run(newId('rt'), user.id, hashRefreshToken(refreshRaw), newId('fam'), new Date(Date.now() + REFRESH_TTL_MS).toISOString());
-
     setRefreshCookie(res, refreshRaw, REFRESH_TTL_MS / 1000);
-    send(res, 200, { accessToken: access, expiresIn: ACCESS_TTL_SECONDS });
+
+    send(res, 200, { token, role: active.role, orgId: active.org_id, orgs: listOrgsFor(user.id) });
   });
 
   router.post('/v1/auth/refresh', async (ctx, params, res) => {
@@ -94,10 +124,11 @@ export function registerRoutes(router, deps) {
     setRefreshCookie(res, newRaw, REFRESH_TTL_MS / 1000);
 
     const membership = db.prepare(
-      `SELECT * FROM memberships WHERE user_id = ? AND status = 'active' ORDER BY created_at ASC`
+      `SELECT m.* FROM memberships m JOIN organizations o ON o.id = m.org_id
+       WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL ORDER BY o.name ASC`
     ).get(row.user_id);
     if (!membership) throw unauthenticated('no active membership');
-    send(res, 200, { accessToken: issueForMembership(row.user_id, membership), expiresIn: ACCESS_TTL_SECONDS });
+    send(res, 200, { token: issueForMembership(row.user_id, membership), role: membership.role, orgId: membership.org_id });
   });
 
   router.post('/v1/auth/token', async (ctx, params, res) => {
@@ -105,28 +136,20 @@ export function registerRoutes(router, deps) {
     if (!orgId) throw badRequest('orgId is required');
     const membership = db.prepare(`SELECT * FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'`).get(orgId, ctx.userId);
     if (!membership) throw notFound();
-    send(res, 200, { accessToken: issueForMembership(ctx.userId, membership), expiresIn: ACCESS_TTL_SECONDS });
+    send(res, 200, { token: issueForMembership(ctx.userId, membership), role: membership.role, orgId });
   });
 
   router.get('/v1/auth/me', async (ctx, params, res) => {
     const user = db.prepare(`SELECT id, email, name FROM users WHERE id = ?`).get(ctx.userId);
-    const orgs = db.prepare(
-      `SELECT o.id, o.name, o.theme, m.role FROM memberships m JOIN organizations o ON o.id = m.org_id
-       WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL`
-    ).all(ctx.userId);
     const resolved = resolve(db, { userId: ctx.userId, orgId: ctx.orgId, deviceId: null });
-    send(res, 200, { user, orgId: ctx.orgId, role: ctx.role, orgs, permissions: resolved.permissions });
+    send(res, 200, { user, orgId: ctx.orgId, role: ctx.role, orgs: listOrgsFor(ctx.userId), permissions: resolved.permissions });
   });
 
   // =====================================================================
   // ORGS
   // =====================================================================
   router.get('/v1/orgs', async (ctx, params, res) => {
-    const orgs = db.prepare(
-      `SELECT o.id, o.name, o.theme, m.role FROM memberships m JOIN organizations o ON o.id = m.org_id
-       WHERE m.user_id = ? AND m.status = 'active' AND o.deleted_at IS NULL`
-    ).all(ctx.userId);
-    send(res, 200, { orgs });
+    send(res, 200, { orgs: listOrgsFor(ctx.userId) });
   });
 
   router.post('/v1/orgs', async (ctx, params, res) => {
@@ -191,7 +214,7 @@ export function registerRoutes(router, deps) {
       throw conflict('an active invite for this email already exists');
     }
     audit(db, { orgId: ctx.orgId, actorId: ctx.userId, action: 'invite.create', targetType: 'invite', targetId: id, result: 'allow', requestId: ctx.requestId });
-    send(res, 201, { id, email, role, token: raw });
+    send(res, 201, { id, email, role, inviteToken: raw }); // raw credential returned ONCE
   });
 
   router.get('/v1/orgs/:org/invites', async (ctx, params, res) => {
@@ -209,16 +232,22 @@ export function registerRoutes(router, deps) {
     send(res, 200, { ok: true });
   });
 
+  // Public. Flat response, no org id, no device data -- a peek must not leak anything
+  // the org itself considers private (PERMISSIONS.md's 404-vs-403 spirit, applied here
+  // to "what a not-yet-a-member may see").
   router.get('/v1/invites/:token', async (ctx, params, res) => {
-    const invite = db.prepare(`SELECT * FROM invites WHERE token_hash = ?`).get(hashInviteToken(params.token));
-    if (!invite || invite.revoked_at || invite.accepted_at || invite.expires_at <= nowIso()) throw gone();
-    const org = db.prepare(`SELECT id, name, theme FROM organizations WHERE id = ?`).get(invite.org_id);
-    send(res, 200, { email: invite.email, role: invite.role, org });
+    const invite = findInviteOr404(params.token);
+    if (invite.accepted_at || invite.revoked_at || invite.expires_at <= nowIso()) throw gone();
+    const org = db.prepare(`SELECT name FROM organizations WHERE id = ?`).get(invite.org_id);
+    send(res, 200, { email: invite.email, role: invite.role, orgName: org.name });
   });
 
+  // Public. Three distinct failure states: no such token (404), already used (409 --
+  // a specific, repeatable conflict, not "gone"), revoked/expired (410).
   router.post('/v1/invites/:token/accept', async (ctx, params, res) => {
-    const invite = db.prepare(`SELECT * FROM invites WHERE token_hash = ?`).get(hashInviteToken(params.token));
-    if (!invite || invite.revoked_at || invite.accepted_at || invite.expires_at <= nowIso()) throw gone();
+    const invite = findInviteOr404(params.token);
+    if (invite.accepted_at) throw conflict('invite has already been accepted');
+    if (invite.revoked_at || invite.expires_at <= nowIso()) throw gone();
 
     const { name, password } = ctx.body;
     let user = db.prepare(`SELECT * FROM users WHERE email = ?`).get(invite.email);
@@ -240,7 +269,7 @@ export function registerRoutes(router, deps) {
 
     db.prepare(`UPDATE invites SET accepted_at = ?, accepted_by = ? WHERE id = ?`).run(nowIso(), user.id, invite.id);
     audit(db, { orgId: invite.org_id, actorId: user.id, action: 'invite.accept', targetType: 'invite', targetId: invite.id, result: 'allow', requestId: ctx.requestId });
-    send(res, 200, { ok: true, orgId: invite.org_id });
+    send(res, 200, { ok: true, orgId: invite.org_id, role: invite.role });
   });
 
   router.patch('/v1/orgs/:org/members/:userId', async (ctx, params, res) => {
@@ -386,6 +415,13 @@ export function registerRoutes(router, deps) {
     if (!['allow', 'deny'].includes(effect)) throw badRequest('effect must be allow or deny');
     if (userId === ctx.userId) throw forbidden('cannot create a grant for yourself', 'self_grant');
 
+    // D19, checked explicitly here so an unknown permission is a controlled 400
+    // rather than an uncaught SQLite foreign-key exception from grant_permissions.
+    for (const p of permissions) {
+      const known = db.prepare(`SELECT 1 FROM permission_patterns WHERE pattern = ?`).get(p);
+      if (!known) throw badRequest(`unknown permission: ${p}`, 'unknown_permission');
+    }
+
     assertMayGrant(db, ctx, permissions, deviceId ?? null);
 
     const starts = normalizeTs(startsAt, 'startsAt');
@@ -486,7 +522,8 @@ export function registerRoutes(router, deps) {
 
   router.get('/v1/orgs/:org/audit', async (ctx, params, res) => {
     assertCan(db, ctx, 'audit:read');
-    const rows = db.prepare(`SELECT * FROM audit_events WHERE org_id = ? ORDER BY at DESC LIMIT 200`).all(ctx.orgId);
+    const { limit, offset } = parsePagination(ctx);
+    const rows = db.prepare(`SELECT * FROM audit_events WHERE org_id = ? ORDER BY at DESC LIMIT ? OFFSET ?`).all(ctx.orgId, limit, offset);
     send(res, 200, { events: rows });
   });
 }
