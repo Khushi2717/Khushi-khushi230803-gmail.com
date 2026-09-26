@@ -52,6 +52,24 @@ an uncaught exception instead of cleanly returning 401 UNAUTHENTICATED.
 
 _This is where most people's first model is wrong. Write down the model you started with, the
 observation that broke it, and the model you moved to. Be specific about the observation._
+### 2026-09-26 (cont.)
+
+Expected resolve() to pass most tests once the deny/allow/wildcard logic was
+right. First run: 31/35 passed, 4 failed, all around reason codes — I was
+returning "implicit" for every kind of deny, but the spec distinguishes them:
+no membership at all -> "not_a_member", suspended membership -> "suspended",
+and the session-start compound check needs its own fixed codes
+("missing_permission" for session:start, "missing_device_permission" for the
+mode permission) rather than whatever resolve() says internally. Fixed by
+branching on membership existence/status before falling into the grant/role
+logic, and hardcoding the two session-check reason codes rather than reusing
+resolve()'s reason field. Second run: 35/35.
+
+Also caught earlier (before this): resolve() originally returned the flat
+permission map directly; check-permissions.js expects it wrapped as
+{ role, permissions: {...} }, matching the API shape in PERMISSIONS.md §8.
+Fixed by wrapping the return and updating every caller (can, assertCan,
+assertMayGrant, assertCanStartSession) to read resolved.permissions[key].
 
 ## Phase 3 — orgs, members, invites
 
