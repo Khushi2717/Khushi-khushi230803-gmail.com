@@ -92,6 +92,16 @@ assertMayGrant, assertCanStartSession) to read resolved.permissions[key].
 
 _Anything you had to work out that no document states. Invite lifecycle states are a common
 source of this._
+### 2026-09-26
+
+Wrote assertCanModify assuming lower rank number = higher authority (owner
+would be rank 1). check-api.js failed "owner demotes Sam to viewer" with a
+403 instead of 200 -- checked db/reference.sql and found the actual values:
+owner=50, admin=40, operator=30, auditor=20, viewer=10. Higher number is
+higher authority, the opposite of my assumption. Fixed the comparison from
+callerRank < targetRank to callerRank > targetRank. Lesson: I should have
+read the actual seed values before writing the comparison instead of
+guessing a convention.
 
 ## Phase 4 — devices and grants
 

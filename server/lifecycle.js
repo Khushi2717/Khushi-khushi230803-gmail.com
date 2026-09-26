@@ -27,9 +27,11 @@ export function assertCanModify(db, callerRole, targetRole) {
   if (callerRank === undefined || targetRank === undefined) {
     throw badRequest('unknown role in modification check');
   }
-  // Lower rank number = higher authority (owner is rank 1, viewer is highest number) —
-  // confirmed against db/reference.sql. callerRank must be STRICTLY more authoritative.
-  if (!(callerRank < targetRank)) {
+  // Higher rank number = higher authority (owner=50, admin=40, operator=30,
+  // auditor=20, viewer=10 — confirmed against db/reference.sql, corrected after
+  // check-api.js caught the original assumption being backwards). callerRank must
+  // be STRICTLY more authoritative than targetRank.
+  if (!(callerRank > targetRank)) {
     throw forbidden('cannot modify a member of equal or higher role', 'scope_mismatch');
   }
 }
