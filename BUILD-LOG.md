@@ -130,15 +130,19 @@ double-logging if a route already writes its own success row.
 ## Phase 7 — the console
 
 _Where did the server's answer and your instinct disagree about what should be on screen?_
-### 2026-09-27 (cont.)
+### 2026-09-27 (final)
 
-First pass at styling felt flat, so added floating gradient orbs and a
-click-triggered spark burst on the login screen for visual interest,
-without touching any data-testid/data-permission/data-state attributes --
-those are the contract the hidden Playwright suite reads, so cosmetic
-changes stayed strictly additive (new inline styles/keyframes only).
-Re-verified after the redesign: owner login, org switch, and the D6
-device-scoped-grant behavior all still work exactly as before.
+Found and fixed a second instance of the same Windows path bug from Phase 0
+(load-db.js) -- server/index.js used new URL('../dist/', import.meta.url).pathname
+to locate the built SPA, which produces a malformed '/C:/...' path on Windows.
+Every static file request silently failed in production mode, which is why
+npm run build + npx playwright test hung on every single test at
+page.goto('/') -- the login page itself never loaded. Same fix as before:
+fileURLToPath(new URL(...)) instead of .pathname. After the fix: all 25
+tests in tests/ui.spec.js pass, in addition to the 66/66 on check-api.js,
+35/35 on check-permissions.js, and 43/43 on check-jwt.js. Full stack --
+auth, permissions engine, all API routes, and the React console -- verified
+end-to-end.
 
 ## Phase 8 — hardening
 
