@@ -107,25 +107,44 @@ modifiable, but you still can't touch yourself.
 
 _What happens at the boundary where two grants disagree, or where a grant's scope and the
 question's scope differ? Say what you predicted and what you got._
+### 2026-09-27
+
+The device-scoped grant model (D6) already fell out correctly from
+permissions.js once it passed check-permissions.js -- no extra work was
+needed at the route layer beyond passing deviceId through to resolve().
+The one thing I had to get right at the route layer specifically: D19
+(unknown permission validation) needed to happen in routes/index.js
+itself, checking against permission_patterns before touching the grants
+table, rather than relying on the database's own foreign key -- see
+DECISIONS.md for why.
 
 ## Phase 5 — sessions
 
 _Two permissions, one device. What did you have to resolve, and in what order, to keep the two
 failure reasons distinguishable?_
+### 2026-09-27
+
+The compound session check (session:start AND the mode's own permission)
+needed two DIFFERENT fixed reason codes so a client can tell which one
+failed -- "missing_permission" for session:start, "missing_device_permission"
+for the mode permission. Initially I reused resolve()'s own reason field for
+both, which happened to work for the "implicit" case but produced the wrong
+string when the underlying deny had a different reason (e.g. explicit_deny).
+check-permissions.js caught this. Fixed by hardcoding the two API-level
+codes in assertCanStartSession rather than trusting resolve()'s internal
+reason.
 
 ## Phase 6 — audit
 
 _What did you decide counts as an auditable event, and what pushed you to that line?_
-### 2026-09-26
+### 2026-09-27
 
-Decision: auditDenials only logs when the caught error is specifically a
-FORBIDDEN (403) HttpError — not every thrown error. A 404 (invisible
-resource) or 400 (bad input) isn't a permission decision, so logging those
-as audit 'deny' rows would conflate "you don't have access" with "your
-request was malformed", muddying what the audit log is supposed to answer.
-Success rows are the caller's job to write inline, in the same transaction
-as the change — this module doesn't wrap successes automatically, to avoid
-double-logging if a route already writes its own success row.
+Pagination (?limit/?offset) wasn't in my first pass of the audit route at
+all -- check-api.js's boundary tests (limit=0, limit=99999, offset=-1, etc.)
+caught the gap immediately, all failing as 200 instead of 400. Added
+explicit bounds (limit 1-200, offset >= 0) rather than silently clamping
+out-of-range values, since clamping would hide a client bug instead of
+surfacing it.
 
 ## Phase 7 — the console
 
@@ -148,6 +167,19 @@ end-to-end.
 
 _What did you measure, what did you fix, and what did you deliberately leave alone? Anything you
 chose not to build belongs here with its reason._
+### 2026-09-27
+
+Measured: full test suite (auth 43, permissions 35, api 66, ui 25 = 169
+assertions total) runs in well under a minute end-to-end on a throwaway
+SQLite file, so no performance work was needed at this scale. Left
+deliberately unbuilt: real-time device status (online/offline is static
+seed data, no live socket), file transfer UI (the button exists per
+UI-INVENTORY.md's contract but has no working backend transfer mechanism
+behind it), and a permission catalogue endpoint (the console's grant-creation
+checkboxes use a hardcoded list of the 19 documented permissions rather than
+reading the live catalogue from the database, so a personalisation overlay's
+extra permission, e.g. device:reboot, won't appear as a grantable checkbox
+even though the resolution engine itself handles it correctly).
 
 ## Open threads
 
