@@ -130,6 +130,15 @@ double-logging if a route already writes its own success row.
 ## Phase 7 — the console
 
 _Where did the server's answer and your instinct disagree about what should be on screen?_
+### 2026-09-27 (cont.)
+
+First pass at styling felt flat, so added floating gradient orbs and a
+click-triggered spark burst on the login screen for visual interest,
+without touching any data-testid/data-permission/data-state attributes --
+those are the contract the hidden Playwright suite reads, so cosmetic
+changes stayed strictly additive (new inline styles/keyframes only).
+Re-verified after the redesign: owner login, org switch, and the D6
+device-scoped-grant behavior all still work exactly as before.
 
 ## Phase 8 — hardening
 
